@@ -13,7 +13,7 @@ from datetime import datetime, timedelta
 # from telegram.ext import Updater, CommandHandler, CallbackContext
 import psutil
 import sqlite3
-import bash64
+import base64
 import json # Kept in case needed elsewhere, but not used in provided logic
 import logging # Kept in case needed elsewhere
 import signal # Kept in case needed elsewhere
