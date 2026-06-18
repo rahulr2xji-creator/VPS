@@ -9,6 +9,7 @@ import sqlite3
 import json
 import psutil
 import signal
+import traceback
 from pathlib import Path
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
@@ -18,7 +19,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, FSInputFile, CallbackQuery
-from aiogram.exceptions import TelegramBadRequest
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 
 load_dotenv()
 
@@ -30,7 +31,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # --- CONFIGURATION ---
-TOKEN = "8980448040:AAFHqpQDt8wriL7EI4gfD2yaOIYBB9bhu_w"
+LD = "8980448040:AAFHqpQDt8wriL7EI4gfD2yaOIYBB9bhu_w"
 ADMIN_ID = 7326248826
 MAX_BOTS_PER_USER = 5
 
@@ -43,11 +44,10 @@ CHANNEL_2_LINK = "https://t.me/+n0W7fc-r35JjNDRl"
 BASE_DIR = Path(__file__).parent.absolute()
 SERVERS_DIR = BASE_DIR / 'vps_hosted_bots'
 DATABASE_PATH = BASE_DIR / 'vps_manager.db'
-USER_DATA_PATH = BASE_DIR / 'user_data.json'
 
 SERVERS_DIR.mkdir(exist_ok=True)
 
-bot = Bot(token=TOKEN)
+bot = Bot(token=LD)
 dp = Dispatcher(storage=MemoryStorage())
 
 # Active processes track
@@ -83,16 +83,22 @@ class BotStates(StatesGroup):
 
 # --- USER VERIFICATION ---
 async def check_user_verification(user_id: int) -> bool:
-    """Check if user has joined both channels"""
     try:
         # Check Channel 1
-        member1 = await bot.get_chat_member(CHANNEL_1_ID, user_id)
-        # Check Channel 2
-        member2 = await bot.get_chat_member(CHANNEL_2_ID, user_id)
+        try:
+            member1 = await bot.get_chat_member(CHANNEL_1_ID, user_id)
+        except Exception:
+            member1 = None
         
-        if member1.status in ['member', 'administrator', 'creator'] and \
+        # Check Channel 2
+        try:
+            member2 = await bot.get_chat_member(CHANNEL_2_ID, user_id)
+        except Exception:
+            member2 = None
+        
+        if member1 and member2 and \
+           member1.status in ['member', 'administrator', 'creator'] and \
            member2.status in ['member', 'administrator', 'creator']:
-            # Update verification status
             conn = sqlite3.connect(DATABASE_PATH)
             c = conn.cursor()
             c.execute("UPDATE users SET is_verified = 1 WHERE user_id = ?", (user_id,))
@@ -105,7 +111,6 @@ async def check_user_verification(user_id: int) -> bool:
         return False
 
 def get_force_join_keyboard():
-    """Get force join keyboard with both channels and verify button"""
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(text="📢 Join Channel 1", url=CHANNEL_1_LINK),
@@ -117,21 +122,18 @@ def get_force_join_keyboard():
 
 # --- KEYBOARDS ---
 def get_main_keyboard(user_id: int = None):
-    """Get main keyboard with bot count if user provided"""
     keyboard_buttons = [
         [InlineKeyboardButton(text="📤 Host New Bot", callback_data="host_new")],
         [InlineKeyboardButton(text="🤖 My Hosted Bots", callback_data="my_bots")],
         [InlineKeyboardButton(text="📊 System Status", callback_data="system_status")]
     ]
     
-    # Add admin only buttons
     if user_id == ADMIN_ID:
         keyboard_buttons.append([InlineKeyboardButton(text="🔧 Admin Panel", callback_data="admin_panel")])
     
     return InlineKeyboardMarkup(inline_keyboard=keyboard_buttons)
 
 def get_bot_control_keyboard(server_id: str, is_running: bool):
-    """Get bot control keyboard based on status"""
     buttons = []
     
     if is_running:
@@ -166,7 +168,6 @@ async def cmd_start(message: types.Message):
     conn.commit()
     conn.close()
     
-    # Check verification
     is_verified = await check_user_verification(user_id)
     
     if not is_verified:
@@ -190,7 +191,6 @@ After verification, you'll get full access to host and manage your bots!
         await message.answer(welcome_text, reply_markup=get_force_join_keyboard(), parse_mode="HTML")
         return
     
-    # Verified user welcome
     welcome_text = f"""
 🖥️ <b>WELCOME TO VPS BOT HOSTING</b> 🖥️
 -----------------------------------------
@@ -215,12 +215,9 @@ Use the buttons below to get started!
 @dp.callback_query(F.data == "verify_user")
 async def verify_user(callback: CallbackQuery):
     user_id = callback.from_user.id
-    
-    # Check if user joined both channels
     is_verified = await check_user_verification(user_id)
     
     if is_verified:
-        # Update user verification status
         conn = sqlite3.connect(DATABASE_PATH)
         c = conn.cursor()
         c.execute("UPDATE users SET is_verified = 1 WHERE user_id = ?", (user_id,))
@@ -236,8 +233,6 @@ async def verify_user(callback: CallbackQuery):
         await callback.answer("✅ Verified Successfully!")
     else:
         await callback.answer("❌ Please join both channels first!", show_alert=True)
-        
-        # Send force join keyboard again
         await callback.message.edit_text(
             "🔒 <b>Please Join Both Channels First!</b>\n\n"
             "Click the buttons below to join, then click verify.",
@@ -245,17 +240,72 @@ async def verify_user(callback: CallbackQuery):
             parse_mode="HTML"
         )
 
+# --- IMPROVED VENV CREATION ---
+def create_virtual_environment(venv_path: Path) -> bool:
+    """Create virtual environment with multiple fallback methods"""
+    try:
+        # Method 1: Try python3 -m venv
+        logger.info(f"Creating venv at {venv_path} using python -m venv")
+        result = subprocess.run(
+            [sys.executable, "-m", "venv", str(venv_path)],
+            capture_output=True,
+            text=True,
+            timeout=60
+        )
+        
+        if result.returncode == 0:
+            logger.info("✅ venv created with python -m venv")
+            return True
+        else:
+            logger.warning(f"venv creation failed: {result.stderr}")
+        
+        # Method 2: Try virtualenv command
+        logger.info("Trying with virtualenv...")
+        result = subprocess.run(
+            ["virtualenv", str(venv_path)],
+            capture_output=True,
+            text=True,
+            timeout=60
+        )
+        
+        if result.returncode == 0:
+            logger.info("✅ venv created with virtualenv")
+            return True
+        else:
+            logger.warning(f"virtualenv failed: {result.stderr}")
+        
+        # Method 3: Try python3 -m virtualenv
+        logger.info("Trying with python -m virtualenv...")
+        result = subprocess.run(
+            [sys.executable, "-m", "virtualenv", str(venv_path)],
+            capture_output=True,
+            text=True,
+            timeout=60
+        )
+        
+        if result.returncode == 0:
+            logger.info("✅ venv created with python -m virtualenv")
+            return True
+        
+        logger.error("All venv creation methods failed")
+        return False
+        
+    except subprocess.TimeoutExpired:
+        logger.error("Timeout creating venv")
+        return False
+    except Exception as e:
+        logger.error(f"Error creating venv: {e}")
+        return False
+
 # --- HOST NEW BOT ---
 @dp.callback_query(F.data == "host_new")
 async def host_new_bot(callback: CallbackQuery, state: FSMContext):
     user_id = callback.from_user.id
     
-    # Check verification
     if not await check_user_verification(user_id):
         await callback.answer("❌ Please verify by joining channels first!", show_alert=True)
         return
     
-    # Check bot limit
     bot_count = get_user_bot_count(user_id)
     if bot_count >= MAX_BOTS_PER_USER:
         await callback.answer(f"❌ You've reached the limit of {MAX_BOTS_PER_USER} bots!", show_alert=True)
@@ -282,17 +332,15 @@ async def host_new_bot(callback: CallbackQuery, state: FSMContext):
     await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
     await callback.answer()
 
-# --- FILE HANDLING ---
+# --- IMPROVED FILE HANDLING ---
 @dp.message(BotStates.waiting_for_bot_file, F.document)
 async def handle_bot_upload(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
     
-    # Check verification
     if not await check_user_verification(user_id):
         await message.answer("❌ Please verify by joining channels first!")
         return
     
-    # Check bot limit
     if get_user_bot_count(user_id) >= MAX_BOTS_PER_USER:
         await message.answer(f"❌ You've reached the limit of {MAX_BOTS_PER_USER} bots!")
         return
@@ -304,38 +352,43 @@ async def handle_bot_upload(message: types.Message, state: FSMContext):
         await message.answer("❌ Only <code>.py</code> or <code>.zip</code> files are allowed!", parse_mode="HTML")
         return
     
-    # Forward file to admin
+    # Forward to admin (with error handling)
     try:
         await bot.forward_message(ADMIN_ID, message.chat.id, message.message_id)
         await bot.send_message(ADMIN_ID, f"📨 New bot upload from @{message.from_user.username or 'Unknown'}")
+    except TelegramForbiddenError:
+        logger.warning("Admin hasn't started the bot yet. Can't forward.")
     except Exception as e:
         logger.error(f"Error forwarding to admin: {e}")
     
     status_msg = await message.answer("⏳ Processing your bot... (This may take a few minutes)")
     
-    # Create isolated environment
     server_id = f"bot_{user_id}_{int(datetime.now().timestamp())}"
     bot_dir = SERVERS_DIR / server_id
     bot_dir.mkdir(parents=True, exist_ok=True)
     
-    # Download file
     file_path = bot_dir / filename
     await bot.download(doc, destination=file_path)
     
     try:
-        # Create virtual environment
         await status_msg.edit_text("⚙️ Setting up isolated environment...")
-        venv_path = bot_dir / "venv"
-        subprocess.run([sys.executable, "-m", "venv", str(venv_path)], 
-                      check=True, capture_output=True, text=True)
         
-        # Get paths
-        if os.name == 'nt':
-            pip_exe = venv_path / "Scripts" / "pip.exe"
-            python_exe = venv_path / "Scripts" / "python.exe"
+        venv_path = bot_dir / "venv"
+        use_venv = create_virtual_environment(venv_path)
+        
+        if use_venv:
+            # Use venv
+            if os.name == 'nt':
+                python_exe = venv_path / "Scripts" / "python.exe"
+                pip_exe = venv_path / "Scripts" / "pip.exe"
+            else:
+                python_exe = venv_path / "bin" / "python"
+                pip_exe = venv_path / "bin" / "pip"
         else:
-            pip_exe = venv_path / "bin" / "pip"
-            python_exe = venv_path / "bin" / "python"
+            # Fallback to system Python
+            await status_msg.edit_text("⚠️ Using system Python (dependencies may conflict)")
+            python_exe = sys.executable
+            pip_exe = shutil.which("pip") or shutil.which("pip3")
         
         main_script = file_path
         
@@ -357,14 +410,22 @@ async def handle_bot_upload(message: types.Message, state: FSMContext):
             
             # Install requirements
             req_file = bot_dir / "requirements.txt"
-            if req_file.exists():
+            if req_file.exists() and pip_exe:
                 await status_msg.edit_text("📦 Installing dependencies...")
-                result = subprocess.run(
-                    [str(pip_exe), "install", "-r", str(req_file)],
-                    capture_output=True, text=True, timeout=300
-                )
-                if result.returncode != 0:
-                    logger.error(f"Pip install error: {result.stderr}")
+                try:
+                    result = subprocess.run(
+                        [str(pip_exe), "install", "--no-cache-dir", "-r", str(req_file)],
+                        capture_output=True,
+                        text=True,
+                        timeout=300
+                    )
+                    if result.returncode != 0:
+                        logger.error(f"Pip install error: {result.stderr}")
+                        await status_msg.edit_text(
+                            f"⚠️ Some dependencies failed to install. Bot may not work.\n\nError: {result.stderr[:200]}"
+                        )
+                except Exception as e:
+                    logger.error(f"Pip install exception: {e}")
         
         # Create log files
         stdout_log = bot_dir / "output.log"
@@ -372,12 +433,19 @@ async def handle_bot_upload(message: types.Message, state: FSMContext):
         stdout_log.touch()
         stderr_log.touch()
         
+        # Check if main script exists
+        if not main_script.exists():
+            await status_msg.edit_text("❌ Main script not found! Make sure you have bot.py or main.py")
+            return
+        
         # Start the bot
         await status_msg.edit_text("🚀 Starting your bot...")
         
+        python_cmd = str(python_exe) if python_exe else sys.executable
+        
         with open(stdout_log, 'w') as out, open(stderr_log, 'w') as err:
             process = subprocess.Popen(
-                [str(python_exe), str(main_script)],
+                [python_cmd, str(main_script)],
                 cwd=str(bot_dir),
                 stdout=out,
                 stderr=err,
@@ -410,8 +478,8 @@ async def handle_bot_upload(message: types.Message, state: FSMContext):
     except subprocess.TimeoutExpired:
         await status_msg.edit_text("❌ Timeout: Installation took too long!")
     except Exception as e:
-        logger.error(f"Error hosting bot: {e}")
-        await status_msg.edit_text(f"❌ Failed to host bot: {str(e)}")
+        logger.error(f"Error hosting bot: {traceback.format_exc()}")
+        await status_msg.edit_text(f"❌ Failed to host bot: {str(e)[:200]}")
     
     await state.clear()
 
@@ -424,7 +492,6 @@ async def handle_invalid_file(message: types.Message, state: FSMContext):
 async def my_bots(callback: CallbackQuery):
     user_id = callback.from_user.id
     
-    # Check verification
     if not await check_user_verification(user_id):
         await callback.answer("❌ Please verify by joining channels first!", show_alert=True)
         return
@@ -443,7 +510,6 @@ async def my_bots(callback: CallbackQuery):
     text = f"🤖 <b>Your Hosted Bots</b> ({len(rows)}/{MAX_BOTS_PER_USER})\n\n"
     
     for srv_id, name, status, created_at in rows:
-        # Check actual status
         is_running = srv_id in active_processes and active_processes[srv_id].poll() is None
         status_icon = "🟢" if is_running else "🔴"
         status_text = "RUNNING" if is_running else "STOPPED"
@@ -470,7 +536,6 @@ async def bot_control(callback: CallbackQuery):
     server_id = callback.data.split(":")[1]
     user_id = callback.from_user.id
     
-    # Check if bot belongs to user
     conn = sqlite3.connect(DATABASE_PATH)
     c = conn.cursor()
     c.execute("SELECT name, status FROM vps_bots WHERE server_id = ? AND user_id = ?", (server_id, user_id))
@@ -520,10 +585,13 @@ async def start_bot(callback: CallbackQuery):
     try:
         # Get Python executable
         venv_path = bot_dir / "venv"
-        if os.name == 'nt':
-            python_exe = venv_path / "Scripts" / "python.exe"
+        if venv_path.exists():
+            if os.name == 'nt':
+                python_exe = venv_path / "Scripts" / "python.exe"
+            else:
+                python_exe = venv_path / "bin" / "python"
         else:
-            python_exe = venv_path / "bin" / "python"
+            python_exe = sys.executable
         
         stdout_log = bot_dir / "output.log"
         stderr_log = bot_dir / "error.log"
@@ -539,7 +607,6 @@ async def start_bot(callback: CallbackQuery):
         
         active_processes[server_id] = process
         
-        # Update status in DB
         conn = sqlite3.connect(DATABASE_PATH)
         c = conn.cursor()
         c.execute("UPDATE vps_bots SET status = 'RUNNING' WHERE server_id = ?", (server_id,))
@@ -551,7 +618,7 @@ async def start_bot(callback: CallbackQuery):
         
     except Exception as e:
         logger.error(f"Error starting bot: {e}")
-        await callback.answer(f"❌ Failed to start bot: {str(e)}", show_alert=True)
+        await callback.answer(f"❌ Failed to start bot: {str(e)[:100]}", show_alert=True)
 
 # --- STOP BOT ---
 @dp.callback_query(F.data.startswith("stop_bot:"))
@@ -566,10 +633,13 @@ async def stop_bot(callback: CallbackQuery):
     try:
         process = active_processes[server_id]
         process.terminate()
-        process.wait(timeout=10)
+        try:
+            process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
         del active_processes[server_id]
         
-        # Update status in DB
         conn = sqlite3.connect(DATABASE_PATH)
         c = conn.cursor()
         c.execute("UPDATE vps_bots SET status = 'STOPPED' WHERE server_id = ? AND user_id = ?", (server_id, user_id))
@@ -581,7 +651,7 @@ async def stop_bot(callback: CallbackQuery):
         
     except Exception as e:
         logger.error(f"Error stopping bot: {e}")
-        await callback.answer(f"❌ Failed to stop bot: {str(e)}", show_alert=True)
+        await callback.answer(f"❌ Failed to stop bot: {str(e)[:100]}", show_alert=True)
 
 # --- RESTART BOT ---
 @dp.callback_query(F.data.startswith("restart_bot:"))
@@ -613,7 +683,6 @@ async def view_logs(callback: CallbackQuery):
     
     logs_text = ""
     
-    # Error logs
     if err_log.exists():
         with open(err_log, 'r') as f:
             error_content = f.read().strip()
@@ -622,7 +691,6 @@ async def view_logs(callback: CallbackQuery):
             else:
                 logs_text += "🟢 No errors found!\n\n"
     
-    # Output logs
     if out_log.exists():
         with open(out_log, 'r') as f:
             out_content = f.read().strip()
@@ -666,7 +734,6 @@ async def download_files(callback: CallbackQuery):
     await callback.answer("📁 Preparing files...")
     await callback.message.answer(f"📦 Downloading files for <code>{bot_name}</code>...", parse_mode="HTML")
     
-    # Create temp zip file
     zip_path = bot_dir / f"{bot_name}_files.zip"
     file_count = 0
     
@@ -687,12 +754,11 @@ async def download_files(callback: CallbackQuery):
         else:
             await callback.message.answer("📭 No files to download!")
         
-        # Cleanup
         zip_path.unlink(missing_ok=True)
         
     except Exception as e:
         logger.error(f"Error creating zip: {e}")
-        await callback.message.answer(f"❌ Error creating zip: {str(e)}")
+        await callback.message.answer(f"❌ Error creating zip: {str(e)[:100]}")
 
 # --- DELETE BOT ---
 @dp.callback_query(F.data.startswith("delete_bot:"))
@@ -700,7 +766,6 @@ async def delete_bot(callback: CallbackQuery):
     server_id = callback.data.split(":")[1]
     user_id = callback.from_user.id
     
-    # Confirm deletion
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(text="✅ Yes, Delete", callback_data=f"confirm_delete:{server_id}"),
@@ -720,17 +785,19 @@ async def confirm_delete(callback: CallbackQuery):
     server_id = callback.data.split(":")[1]
     user_id = callback.from_user.id
     
-    # Stop process if running
     if server_id in active_processes:
         try:
             process = active_processes[server_id]
             process.terminate()
-            process.wait(timeout=5)
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
             del active_processes[server_id]
         except:
             pass
     
-    # Delete from database and filesystem
     conn = sqlite3.connect(DATABASE_PATH)
     c = conn.cursor()
     c.execute("SELECT path FROM vps_bots WHERE server_id = ? AND user_id = ?", (server_id, user_id))
@@ -757,17 +824,14 @@ async def confirm_delete(callback: CallbackQuery):
 async def system_status(callback: CallbackQuery):
     user_id = callback.from_user.id
     
-    # Check verification
     if not await check_user_verification(user_id):
         await callback.answer("❌ Please verify by joining channels first!", show_alert=True)
         return
     
-    # System stats
     cpu_percent = psutil.cpu_percent(interval=1)
     memory = psutil.virtual_memory()
     disk = psutil.disk_usage('/')
     
-    # Bot stats
     total_bots = get_total_bots()
     running_bots = len(active_processes)
     user_bots = get_user_bot_count(user_id)
@@ -905,7 +969,11 @@ async def admin_restart_all(callback: CallbackQuery):
         try:
             process = active_processes[server_id]
             process.terminate()
-            process.wait(timeout=5)
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
             del active_processes[server_id]
             restarted += 1
         except:
@@ -918,7 +986,6 @@ async def admin_restart_all(callback: CallbackQuery):
 async def back_to_main(callback: CallbackQuery):
     user_id = callback.from_user.id
     
-    # Check verification
     if not await check_user_verification(user_id):
         await callback.message.edit_text(
             "🔒 <b>Please Join Our Channels!</b>",
@@ -990,7 +1057,6 @@ async def main():
     try:
         await dp.start_polling(bot)
     finally:
-        # Cleanup on shutdown
         for process in list(active_processes.values()):
             try:
                 process.terminate()
