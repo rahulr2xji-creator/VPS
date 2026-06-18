@@ -49,10 +49,10 @@ def keep_alive():
 TOKEN = base64.b64decode(
     "ODk4MDQ0ODA0MDpBQUdTWnVVQm0wZEFsRG9uQkZzTXNaSFRzaG54b1B1al9pZw=="
 ).decode() # Replace with your actual token
-OWNER_ID = 8603275005 # Replace with your Owner ID
-ADMIN_ID = 8603275005 # Replace with your Admin ID (can be same as Owner)
-YOUR_USERNAME = 'SOHAN VIP' # Replace with your Telegram username (without the @)
-UPDATE_CHANNEL = 'https://t.me/hhhbananan' # Replace with your update channel link
+OWNER_ID = 7326248826 # Replace with your Owner ID
+ADMIN_ID = 7326248826 # Replace with your Admin ID (can be same as Owner)
+YOUR_USERNAME = 'VPSCTR' # Replace with your Telegram username (without the @)
+UPDATE_CHANNEL = 'https://t.me/VPSCTR' # Replace with your update channel link
 
 # Folder setup - using absolute paths
 BASE_DIR = os.path.abspath(os.path.dirname(__file__)) # Get script's directory
